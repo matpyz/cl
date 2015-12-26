@@ -6,7 +6,7 @@ import Token
 
 %wrapper "basic"
 
-$comment = [^\]]
+$comment = [\r\n[^\]]]
 
 tokens :-
  DECLARE|IN|END
