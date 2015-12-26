@@ -3,7 +3,7 @@ module Token where
 import Numeric.Natural
 
 type Num = Natural
-type PIdentifier = String
+type PIdentifier = (Int, Int, String)
 
 data ArithOp
   = Add | Sub | Mul | Div | Mod
@@ -17,8 +17,8 @@ data Token
   | FOR | DOWN | FROM | TO | ENDFOR
   | GET | PUT
   | EQUAL | SEMICOLON | LPAREN | RPAREN
-  | ARITHOP ArithOp
-  | RELOP RelOp
-  | NUM Natural
-  | ID PIdentifier
+  | ARITHOP !ArithOp
+  | RELOP !RelOp
+  | NUM !Natural
+  | ID !PIdentifier
   deriving (Read)

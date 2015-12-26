@@ -1,9 +1,9 @@
 {
-module Parser (parseProgram) where
+module Parser (parse) where
 
 import Token
 import Lexer
-import Syntax
+import Source
 }
 
 %name happyParseProgram
@@ -73,6 +73,6 @@ index : { NoIx }
       | '(' pidentifier ')' { VarIx $2 }
 
 {
-parseProgram :: String -> Program
-parseProgram = happyParseProgram . alexScanTokens
+parse :: String -> Source
+parse = happyParseProgram . alexScanTokens
 }

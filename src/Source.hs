@@ -1,9 +1,9 @@
-module Syntax where
+module Source where
 
-import Token
 import Numeric.Natural
+import Token
 
-type Program = ([VDeclaration], [Command])
+type Source = ([VDeclaration], [Command])
 
 type VDeclaration = (PIdentifier, Maybe Natural)
 

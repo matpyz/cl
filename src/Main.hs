@@ -4,5 +4,5 @@ import Parser
 
 main :: IO ()
 main = do
-  contents <- parseProgram <$> getContents
+  contents <- parse <$> getContents
   print contents
