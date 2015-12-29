@@ -1,9 +1,13 @@
-module Token where
+module Token (
+  Name,
+  ArithOp(..),
+  RelOp(..),
+  Token(..)
+) where
 
-import Numeric.Natural
+import           Numeric.Natural (Natural)
 
-type Num = Natural
-type PIdentifier = (Int, Int, String)
+type Name = (String, (Int, Int))
 
 data ArithOp
   = Add | Sub | Mul | Div | Mod
@@ -20,5 +24,5 @@ data Token
   | ARITHOP !ArithOp
   | RELOP !RelOp
   | NUM !Natural
-  | ID !PIdentifier
-  deriving (Read)
+  | ID !Name
+  deriving (Read, Show)

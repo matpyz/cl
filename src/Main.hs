@@ -1,8 +1,10 @@
 module Main (main) where
 
 import Parser
+import Check
+import Compiler.Hoopl
 
 main :: IO ()
 main = do
-  contents <- parse <$> getContents
+  contents <- runSimpleUniqueMonad . check . parse <$> getContents
   print contents

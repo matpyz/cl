@@ -1,14 +1,14 @@
 {
 module Parser (parse) where
 
-import Token
-import Lexer
-import Source
+import Token (Name, Token(..))
+import Lexer (alexScanTokens)
+import Source (Source, Decl(..), Command(..), Expression(..), Value(..), Index(..))
 }
 
 %name happyParseProgram
 %tokentype { Token }
-%error { \_ -> error "syntax error" }
+%error { \tok -> error $ "syntax error: unexpected " ++ show (take 3 tok) }
 %token
   DECLARE { DECLARE }
   IN { IN }
@@ -40,8 +40,8 @@ import Source
 
 program : DECLARE vdeclarations IN commands END { (reverse $2, reverse $4) }
 
-vdeclarations : vdeclarations pidentifier { ($2, Nothing) : $1 }
-              | vdeclarations pidentifier '(' num ')' { ($2, Just $4) : $1 }
+vdeclarations : vdeclarations pidentifier { Decl $2 Nothing : $1 }
+              | vdeclarations pidentifier '(' num ')' { Decl $2 (Just $4) : $1 }
               | { [] }
 
 commands : commands command { $2 : $1 }

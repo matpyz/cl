@@ -30,5 +30,5 @@ tokens :-
  "=" { \_ _ -> RELOP (True, EQ) }
  ">" { \_ _ -> RELOP (True, GT) }
  [0-9]+ { \_ s -> NUM (read s) }
- [_a-z]+ { \(AlexPn _ l c) s -> ID (l, c, s) }
+ [_a-z]+ { \(AlexPn _ l c) s -> ID (s, (l, c)) }
  $white+ | "[" $comment* "]" ;
