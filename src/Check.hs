@@ -1,10 +1,11 @@
 module Check where
 
-import Data.List
-import Token (Name)
-import Source
-import Control.Monad.RWS
-import Compiler.Hoopl hiding ((<*>))
+import           Compiler.Hoopl    hiding ((<*>))
+import           Control.Monad.RWS
+import           Data.List
+import           Data.Maybe
+import           Source
+import           Token             (Name)
 
 type Id = Int
 type Env = [(String, Id)]
@@ -31,9 +32,8 @@ with (Decl n@(str, pos) s) cont = do
   modify (mapInsert uniq (Decl n s))
   local ((str, uniq) :) cont
 
-class Traversable f => Chk f where
+class Chk f where
   chk :: UniqueMonad m => f Name -> CheckT m (f Id)
-  chk = traverse nameToId
 
 instance Chk Command where
   chk (a := e) = (:=) <$> chkIdentifier a <*> chk e
@@ -53,21 +53,41 @@ chkCommands :: UniqueMonad m => [Command Name] -> CheckT m [Command Id]
 chkCommands = traverse chk
 
 chkIdentifier :: UniqueMonad m => Identifier Name -> CheckT m (Identifier Id)
-chkIdentifier (x, ix) = (,) <$> nameToId x <*> chk ix
+chkIdentifier (x, ix) = (,) <$> nameToId indexed x <*> chk ix
+  where
+    indexed = case ix of
+      NoIx -> False
+      _ -> True
 
 chkCondition :: UniqueMonad m => Condition Name -> CheckT m (Condition Id)
 chkCondition (a, o, b) = (,,) <$> chk a <*> pure o <*> chk b
 
-instance Chk Expression
-instance Chk Index
-instance Chk Value
+instance Chk Expression where
+  chk (Val v) = Val <$> chk v
+  chk (Expr a o b) = Expr <$> chk a <*> pure o <*> chk b
 
-nameToId :: UniqueMonad m => Name -> CheckT m Id
-nameToId n@(str, pos) = do
+instance Chk Index where
+  chk NoIx = pure NoIx
+  chk (LitIx l) = pure (LitIx l)
+  chk (VarIx v) = VarIx <$> nameToId False v
+
+instance Chk Value where
+  chk (Lit l) = pure (Lit l)
+  chk (Var v) = Var <$> chkIdentifier v
+
+nameToId :: UniqueMonad m => Bool -> Name -> CheckT m Id
+nameToId indexed n@(str, pos) = do
   env <- ask
   case lookup str env of
     Nothing -> do
       tell . Endo . (:) $
         "Niezadeklarowana zmienna " ++ str ++ " w " ++ show pos
       lift freshUnique
-    Just uniq -> return uniq
+    Just uniq -> do
+      Just info <- gets (mapLookup uniq)
+      when (isNothing (size info) == indexed) $
+        tell . Endo . (:) $
+          "Nieprawidlowe uzycie zmiennej " ++
+          (if indexed then "skalarnej " else "tablicowej ") ++
+          str ++ " w " ++ show pos
+      return uniq
