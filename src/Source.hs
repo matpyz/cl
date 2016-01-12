@@ -1,30 +1,24 @@
 {-# LANGUAGE DeriveTraversable #-}
 module Source (
+  Name,
+  Id,
   Source,
-  Decl(..),
   Command(..),
   Expression(..),
-  Condition,
+  Condition(..),
+  ArithOp(..),
+  RelOp(..),
   Value(..),
-  Identifier,
+  Identifier(..),
   Index(..)
 ) where
 
 import           Numeric.Natural (Natural)
-import           Token           (ArithOp, Name, RelOp)
+import           Token           (ArithOp(..), Name, RelOp)
 
-type Source = ([Decl], [Command Name])
+type Id = String
 
-data Decl = Decl {
-  name :: Name,
-  size :: Maybe Natural
-} deriving (Show)
-
-decl :: Decl
-decl = Decl {
-  name = ("", (0, 0)),
-  size = Nothing
-}
+type Source = ([(Name, Maybe Natural)], [Command Name])
 
 data Command a
   = Identifier a := Expression a
@@ -38,12 +32,14 @@ data Command a
 data Expression a = Val (Value a) | Expr (Value a) ArithOp (Value a)
   deriving (Show, Functor, Foldable, Traversable)
 
-type Condition a = (Value a, RelOp, Value a)
+data Condition a = Con (Value a) RelOp (Value a)
+  deriving (Show, Functor, Foldable, Traversable)
 
 data Value a = Lit Natural | Var (Identifier a)
   deriving (Show, Functor, Foldable, Traversable)
 
-type Identifier a = (a, Index a)
+data Identifier a = Id a (Index a)
+  deriving (Show, Functor, Foldable, Traversable)
 
 data Index a = NoIx | LitIx Natural | VarIx a
   deriving (Show, Functor, Foldable, Traversable)

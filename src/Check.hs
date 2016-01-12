@@ -1,66 +1,70 @@
 module Check where
 
-import           Compiler.Hoopl    hiding ((<*>))
 import           Control.Monad.RWS
 import           Data.List
+import qualified Data.Map          as M
 import           Data.Maybe
+import           Info
+import           Numeric.Natural   (Natural)
 import           Source
-import           Token             (Name)
 
-type Id = Int
-type Env = [(String, Id)]
-type SymbolTable = UniqueMap Decl
-type CheckT = RWST Env (Endo [String]) SymbolTable
+type Env = [String]
 
-check :: UniqueMonad m => Source -> m (SymbolTable, [Command Id])
-check (decls, cmds) = do
-  (cmds', symtab, errors) <- runRWST go [] mapEmpty
-  case intercalate "\n" $ appEndo errors [] of
-    [] -> return (symtab, cmds')
+type CheckM = RWS Env (Endo [String]) Info
+
+check :: Source -> ([Command Id], Info)
+check (decls, cmds) = let
+  (cmds', info, errors) = runRWS go [] mkInfo
+  in case intercalate "\n" $ appEndo errors [] of
+    [] -> (cmds', info)
     es -> error es
   where
-  go = foldr with (chkCommands cmds) decls
+  go = foldr (with Glob) (chkCommands cmds) decls
 
-with :: UniqueMonad m => Decl -> CheckT m a -> CheckT m a
-with (Decl n@(str, pos) s) cont = do
+with :: Kind -> (Name, Maybe Natural) -> CheckM a -> CheckM a
+with k (n@(str, pos), s) cont = do
   env <- ask
-  case lookup str env of
-    Nothing -> return ()
-    Just _ -> tell . Endo . (:) $
+  when (str `elem` env) $
+    tell . Endo . (:) $
       "Redeklaracja zmiennej " ++ str ++ " w " ++ show pos
-  uniq <- lift freshUnique
-  modify (mapInsert uniq (Decl n s))
-  local ((str, uniq) :) cont
+  modify (\(Info t m v) -> Info (M.insert str Decl {
+    name = n,
+    size = s,
+    kind = k,
+    addr = [m],
+    regs = []
+    } t) (m + fromMaybe 1 s) (v + 1))
+  local (str :) cont
 
 class Chk f where
-  chk :: UniqueMonad m => f Name -> CheckT m (f Id)
+  chk :: f Name -> CheckM (f Id)
 
 instance Chk Command where
-  chk (a := e) = (:=) <$> chkIdentifier a <*> chk e
+  chk (a := e) = (:=) <$> chk a <*> chk e
   chk (If c s1 s2) = If <$> chkCondition c <*> chkCommands s1 <*> chkCommands s2
   chk (For i down a b s) = do
     a' <- chk a
     b' <- chk b
-    with (Decl i Nothing) $ do
-      i' <- asks (snd . head)
+    with Iter (i, Nothing) $ do
+      i' <- asks head
       s' <- chkCommands s
       return (For i' down a' b' s')
   chk (While c s) = While <$> chkCondition c <*> chkCommands s
-  chk (Get a) = Get <$> chkIdentifier a
+  chk (Get a) = Get <$> chk a
   chk (Put a) = Put <$> chk a
 
-chkCommands :: UniqueMonad m => [Command Name] -> CheckT m [Command Id]
+chkCommands :: [Command Name] -> CheckM [Command Id]
 chkCommands = traverse chk
 
-chkIdentifier :: UniqueMonad m => Identifier Name -> CheckT m (Identifier Id)
-chkIdentifier (x, ix) = (,) <$> nameToId indexed x <*> chk ix
-  where
-    indexed = case ix of
-      NoIx -> False
-      _ -> True
+instance Chk Identifier where
+  chk (Id x ix) = Id <$> chkName indexed x <*> chk ix
+    where
+      indexed = case ix of
+        NoIx -> False
+        _ -> True
 
-chkCondition :: UniqueMonad m => Condition Name -> CheckT m (Condition Id)
-chkCondition (a, o, b) = (,,) <$> chk a <*> pure o <*> chk b
+chkCondition :: Condition Name -> CheckM (Condition Id)
+chkCondition (Con a o b) = Con <$> chk a <*> pure o <*> chk b
 
 instance Chk Expression where
   chk (Val v) = Val <$> chk v
@@ -69,25 +73,23 @@ instance Chk Expression where
 instance Chk Index where
   chk NoIx = pure NoIx
   chk (LitIx l) = pure (LitIx l)
-  chk (VarIx v) = VarIx <$> nameToId False v
+  chk (VarIx v) = VarIx <$> chkName False v
 
 instance Chk Value where
   chk (Lit l) = pure (Lit l)
-  chk (Var v) = Var <$> chkIdentifier v
+  chk (Var v) = Var <$> chk v
 
-nameToId :: UniqueMonad m => Bool -> Name -> CheckT m Id
-nameToId indexed n@(str, pos) = do
+chkName :: Bool -> Name -> CheckM Id
+chkName indexed n@(str, pos) = do
   env <- ask
-  case lookup str env of
-    Nothing -> do
+  if str `elem` env then do
+    Just info <- gets (M.lookup str . symtab)
+    when (isNothing (size info) == indexed) $
       tell . Endo . (:) $
-        "Niezadeklarowana zmienna " ++ str ++ " w " ++ show pos
-      lift freshUnique
-    Just uniq -> do
-      Just info <- gets (mapLookup uniq)
-      when (isNothing (size info) == indexed) $
-        tell . Endo . (:) $
-          "Nieprawidlowe uzycie zmiennej " ++
-          (if indexed then "skalarnej " else "tablicowej ") ++
-          str ++ " w " ++ show pos
-      return uniq
+        "Nieprawidlowe uzycie zmiennej " ++
+        (if indexed then "skalarnej " else "tablicowej ") ++
+        str ++ " w " ++ show pos
+  else
+    tell . Endo . (:) $
+      "Niezadeklarowana zmienna " ++ str ++ " w " ++ show pos
+  return str

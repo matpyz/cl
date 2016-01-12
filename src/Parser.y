@@ -3,7 +3,8 @@ module Parser (parse) where
 
 import Token (Name, Token(..))
 import Lexer (alexScanTokens)
-import Source (Source, Decl(..), Command(..), Expression(..), Value(..), Index(..))
+import Source (Source, Command(..), Expression(..),
+  Condition(..), Value(..), Identifier(..), Index(..))
 }
 
 %name happyParseProgram
@@ -40,8 +41,8 @@ import Source (Source, Decl(..), Command(..), Expression(..), Value(..), Index(.
 
 program : DECLARE vdeclarations IN commands END { (reverse $2, reverse $4) }
 
-vdeclarations : vdeclarations pidentifier { Decl $2 Nothing : $1 }
-              | vdeclarations pidentifier '(' num ')' { Decl $2 (Just $4) : $1 }
+vdeclarations : vdeclarations pidentifier { ($2, Nothing) : $1 }
+              | vdeclarations pidentifier '(' num ')' { ($2, Just $4) : $1 }
               | { [] }
 
 commands : commands command { $2 : $1 }
@@ -61,12 +62,12 @@ down : { False }
 expression : value { Val $1 }
            | value arithop value { Expr $1 $2 $3 }
 
-condition : value relop value { ($1, $2, $3) }
+condition : value relop value { Con $1 $2 $3 }
 
 value : num { Lit $1 }
       | identifier { Var $1 }
 
-identifier : pidentifier index { ($1, $2) }
+identifier : pidentifier index { Id $1 $2 }
 
 index : { NoIx }
       | '(' num ')' { LitIx $2 }
