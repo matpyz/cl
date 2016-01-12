@@ -25,7 +25,7 @@ render :: [Target] -> String
 render = unlines . map show
 
 data Reg = R0 | R1 | R2 | R3 | R4 | R5 | R6 | R7 | R8 | R9
-  deriving (Enum, Bounded)
+  deriving (Eq, Ord, Enum, Bounded)
 
 r :: Int -> Reg
 r = toEnum

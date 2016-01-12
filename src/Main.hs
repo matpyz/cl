@@ -1,12 +1,18 @@
 module Main (main) where
 
-import Parser
-import Check
-import Compiler.Hoopl
-import Intermediate
+import           Allocate
+import           Check
+import           CodeGen
+import           Compiler.Hoopl
+import           Control.Monad
+import           Expand
+import           Intermediate
+import           Parser
+import           Target
+import Debug.Trace
 
 main :: IO ()
 main = do
-  (agraph, info) <- intermediate . check . parse <$> getContents
-  putStrLn (showGraph show (runSimpleUniqueMonad (graphOfAGraph agraph)))
-  print info
+  (graph, symTab) <- allocate . runSimpleUniqueMonad . (expand <=< intermediate) . check . parse <$> getContents
+  traceIO (showGraph show graph)
+  putStr (render (codeGen (graph, symTab)))
