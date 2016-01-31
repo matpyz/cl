@@ -1,5 +1,6 @@
 module Check where
 
+import           Control.Lens      hiding (Index)
 import           Control.Monad.RWS
 import qualified Data.DList        as D
 import           Data.List
@@ -29,12 +30,13 @@ with k (n@(str, pos), s) cont = do
   when (str `elem` env) $
     msg ["Redeklaracja zmiennej ", str, " w ", show pos]
   modify $ add Sym {
-    name = n,
-    size = s,
-    kind = k,
-    defn = k == Iter || isJust s,
-    memo = Nothing,
-    addr = (mempty, mempty)
+    _name = n,
+    _size = s,
+    _kind = k,
+    _defined = k == Iter || isJust s,
+    _memory = Nothing,
+    _regs = mempty,
+    _addrs = mempty
     }
   local (str :) cont
 
@@ -85,13 +87,13 @@ chkName :: Bool -> Bool -> Name -> CheckM Id
 chkName lValue indexed n@(str, pos) = do
   env <- ask
   if str `elem` env then do
-    Just sym <- gets (M.lookup str)
-    when (isNothing (size sym) == indexed) $
+    Just sym <- use $ at str
+    when (isNothing (sym^.size) == indexed) $
       msg [
         "Uzycie niezgodne z typem zmiennej ",
         if indexed then "skalarnej " else "tablicowej ",
         str, " w ", show pos]
-    unless (lValue || defn sym) $
+    unless (lValue || sym^.defined) $
       msg ["Uzycie niezainicjalizowanej zmienej ", str, " w ", show pos]
   else
     msg ["Niezadeklarowana zmienna ", str, " w ", show pos]
@@ -102,6 +104,6 @@ chkLValue (Id v ix) = do
   v' <- chkName True (hasIndex ix) v
   case ix of
     NoIx -> do
-      modify $ adjust (\s -> s { defn = True }) (fst v)
+      at (fst v)._Just.defined .= True
       return (Id v' NoIx)
     i -> Id v' <$> chk i

@@ -10,16 +10,17 @@ import           SymTab
 
 allocate :: (Intermediate, SymTab) -> (Intermediate, SymTab)
 allocate (inter, symTab) =
-  (inter, M.fromList [(fst $ name sym, sym) | sym <- list] `M.union` symTab)
+  (inter, M.fromList [(fst $ _name sym, sym) | sym <- list] `M.union` symTab)
   where
-    list = snd $ mapAccumL alloc (0, addressSpace) $ sortOn size
-      [sym | sym <- M.elems symTab, kind sym /= Temp]
+    list = snd $ mapAccumL alloc (0, addressSpace) $ sortOn _size
+      -- [sym | sym <- M.elems symTab, kind sym /= Temp]
+      (M.elems symTab)
 
 alloc :: (Natural, [Natural]) -> Sym -> ((Natural, [Natural]), Sym)
-alloc (m, ~(a:space)) sym@Sym { size = Nothing } =
-  ((max m (a + 1), space), sym { memo = Just a })
-alloc (m, space) sym@Sym { size = Just sz } =
-  ((m', space'), sym { memo = Just a })
+alloc (m, ~(a:space)) sym@Sym { _size = Nothing } =
+  ((max m (a + 1), space), sym { _memory = Just a })
+alloc (m, space) sym@Sym { _size = Just sz } =
+  ((m', space'), sym { _memory = Just a })
   where
     a | m == 0 = 0
       | otherwise = if costOf n < costOf m then n else m

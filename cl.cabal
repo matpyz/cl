@@ -68,6 +68,7 @@ executable cl
                        containers,
                        dlist,
                        hoopl,
+                       lens,
                        mtl
 
   -- Directories containing source files.

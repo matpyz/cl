@@ -56,7 +56,7 @@ mkFor i down a b body = do
   let before = before0 H.<*> mkMiddle (Inc c) H.<*> before1
   let cond t f = mkLast (Czero c f t)
   let op = if down then Dec else Inc
-  let inside = mkMiddles [Dec c, op i] H.<*> body
+  let inside = mkMiddle (Dec c) H.<*> body H.<*> mkMiddle (op i)
   return (before H.<*> mkWhileDo cond inside)
 
 indexToRValue :: Index Id -> Maybe RValue

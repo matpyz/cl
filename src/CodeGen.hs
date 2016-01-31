@@ -1,9 +1,10 @@
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs           #-}
+{-# LANGUAGE TemplateHaskell #-}
 module CodeGen where
 
 import           Allocate
 import           Compiler.Hoopl      hiding ((<*>))
-import           Control.Arrow
+import           Control.Lens
 import           Control.Monad.State
 import           Data.Char
 import           Data.Function
@@ -19,11 +20,13 @@ import           Target
 import           Token
 
 data CG = CG {
-  sym     :: SymTab,
-  regs    :: M.Map Reg (S.Set Id),
-  resolve :: Label -> Imm,
-  code    :: [Target]
+  _sym     :: SymTab,
+  _descr   :: M.Map Reg (S.Set Id),
+  _resolve :: Label -> Imm,
+  _code    :: [Target]
 }
+
+makeLenses ''CG
 
 type CGM = State CG
 
@@ -32,10 +35,10 @@ codeGen (inter, symTab) = result
   where
     (result, reslv) = resolveLabels (evalState (cgGraph inter) initialState)
     initialState = CG {
-      sym = symTab,
-      regs = M.fromList [(reg, S.empty) | reg <- [R1 .. R9]],
-      resolve = reslv,
-      code = []
+      _sym = symTab,
+      _descr = M.fromList [(reg, S.empty) | reg <- [R1 .. R9]],
+      _resolve = reslv,
+      _code = []
       }
 
 cgGraph :: Intermediate -> CGM [Either Label Target]
@@ -50,10 +53,10 @@ cgGraph (GMany (JustO entry) body (JustO exit)) = do
 
 cgBlock :: Block Node e x -> CGM [Either Label Target]
 cgBlock block = do
-  alive <- gets (M.keysSet . M.filter (\x -> kind x /= Temp) . sym)
-  let exitUses = getExitUses exit alive
-      nodes' = getUses (reverse nodes) exitUses []
-  cg nodes'
+  alive <- uses sym (M.keysSet . M.filter (\x -> x^.kind /= Temp))
+  let exitUses = getExitUses exit
+      nodes' = getUses (reverse nodes) exitUses alive []
+  cg nodes' alive
   cgExit exit alive
   code <- flush
   return $ case entry of
@@ -64,221 +67,255 @@ cgBlock block = do
     nodes = blockToList middle
 
 flush :: CGM [Target]
-flush = state (\cg -> (reverse (code cg), cg {
-  sym = M.map (\s -> s { addr = (S.empty, maybe S.empty S.singleton (memo s)) }) (sym cg),
-  code = []
-}))
+flush = do
+  cg <- get
+  zoom (sym.traverse) $ do
+    regs .= S.empty
+    memo <- use memory
+    addrs .= maybe S.empty S.singleton memo
+  code .= []
+  return (reverse (cg^.code))
 
-bindRegister :: Reg -> Id -> CGM ()
-bindRegister reg var = modify (\cg -> cg {
-  sym = adjust (setAddr $ first (S.insert reg)) var (sym cg),
-  regs = M.insertWith S.union reg (S.singleton var) (regs cg)
-})
+regBind :: Reg -> Id -> CGM ()
+regBind reg var = do
+  sym.ix var.regs.icontains reg .= True
+  descr.ix reg.icontains var .= True
 
-rebindRegister :: Reg -> Id -> CGM ()
-rebindRegister reg var = modify (\cg -> cg {
-  sym = adjust (setAddr $ \(_, _) ->
-    (S.singleton reg, S.empty)) var (sym cg),
-  regs = M.insert reg (S.singleton var) $ M.map (S.delete var) (regs cg)
-})
+regRebind :: Reg -> Id -> S.Set Id -> S.Set Id -> CGM ()
+regRebind reg var used alive = do
+  zoom (sym.ix var) $ do
+    regs .= S.singleton reg
+    addrs .= S.empty
+  zoom descr $ do
+    traverse.icontains var .= False
+    ix reg.icontains var .= True
+  saveOnLastUse reg (VarRV var) used alive
 
-unbindRegister :: Reg -> Id -> CGM ()
-unbindRegister reg var = modify (\cg -> cg {
-  sym = adjust (setAddr $ first (S.delete reg)) var (sym cg)
-})
+regUnbind :: Reg -> Id -> CGM ()
+regUnbind reg var =
+  sym.ix var.regs.icontains reg .= False
 
-getLoc :: RValue -> CGM Reg
-getLoc (LitRV lit) = do
-  reg <- getEmptyRegister
+getLoc :: RValue -> [Reg] -> CGM Reg
+getLoc (LitRV lit) locked = do
+  reg <- getEmptyRegister locked
   cgConst reg lit
   return reg
-getLoc (VarRV var) = do
-  locations <- gets (addr . (M.! var) . sym)
-  case locations of
-    (registers, addresses)
-      | S.null registers && S.null addresses -> do
-        reg <- getEmptyRegister
-        bindRegister reg var
-        return reg
-      | S.null registers && not (S.null addresses) -> do
-        let bestAddress = minimumBy (compare `on` costOf) addresses
-        reg <- getEmptyRegister
-        cgConst reg bestAddress
-        emit (LOAD reg (Ind reg))
-        bindRegister reg var
-        return reg
-      | otherwise ->
-        return (S.findMin registers)
+getLoc (VarRV var) locked = do
+  entry <- use $ sym.ix var
+  let registers = entry^.regs
+      addresses = entry^.addrs
+  if S.null registers && S.null addresses then do
+    reg <- getEmptyRegister locked
+    regBind reg var
+    return reg
+  else if S.null registers && not (S.null addresses) then do
+    let bestAddress = minimumBy (compare `on` costOf) addresses
+    reg <- getEmptyRegister locked
+    cgConst reg bestAddress
+    emit (LOAD reg (Ind reg))
+    regBind reg var
+    return reg
+  else do
+    dscr <- gets _descr
+    return (minimumBy (compare `on` (S.size . (dscr M.!))) registers)
 
-save :: S.Set Id -> CGM ()
-save vars = do
-  symTab <- gets sym
-  forM_ vars $ \var -> do
-    let s = symTab M.! var
-        (regs, _) = addr s
-    unless (S.null regs) $ let reg = S.findMin regs in case memo s of
-      Just mem -> do
-        modify (\cg -> cg {
-          sym = adjust (setAddr $ second (S.insert mem)) var (sym cg)
-          })
-        cgConst R0 mem
-        emit (STORE reg (Ind R0))
-      Nothing ->
-        return ()
+getMem :: Id -> CGM (Maybe Natural)
+getMem var = _memory <$> use (sym.ix var)
 
-getEmptyRegister :: CGM Reg
-getEmptyRegister = do
-  registers <- gets regs
-  let (emptys, nonemptys) = M.partition S.null registers
-  if M.null emptys then do
+saveWith :: Reg -> Id -> Natural -> CGM ()
+saveWith reg var mem = do
+  sym.ix var.addrs.icontains mem .= True
+  cgConst R0 mem
+  emit (STORE reg (Ind R0))
+
+saveOnLastUse :: Reg -> RValue -> S.Set Id -> S.Set Id -> CGM ()
+saveOnLastUse reg (LitRV _) used alive = return ()
+saveOnLastUse reg (VarRV var) used alive =
+  unless (var `S.member` used) $ do
+    descr.traverse.icontains var .= False
+    zoom (sym.ix var) $ do
+      regs .= S.empty
+      addrs .= S.empty
+    when (var `S.member` alive) $ do
+      Just mem <- getMem var
+      addresses <- _addrs <$> use (sym.ix var)
+      unless (mem `S.member` addresses) $
+        saveWith reg var mem
+
+save :: Id -> CGM ()
+save var = do
+  memo <- getMem var
+  case memo of
+    Nothing ->
+      error "save"
+    Just mem -> do
+      registers <- _regs <$> use (sym.ix var)
+      unless (S.null registers) $ do
+        let reg = S.findMin registers
+        saveWith reg var mem
+
+getEmptyRegister :: [Reg] -> CGM Reg
+getEmptyRegister locked = do
+  (nulls, fulls) <- uses descr $
+    M.partition S.null . M.filterWithKey (\k _ -> k `notElem` locked)
+  if M.null nulls then do
     let comp = compare `on` S.size . snd
-    let (reg, vars) = minimumBy comp $ M.toList nonemptys
-    save vars
-    mapM_ (unbindRegister reg) vars
+        (reg, vars) = minimumBy comp $ M.toList fulls
+    vars `forM_` \var -> do
+      save var
+      regUnbind reg var
     return reg
   else
-    return (fst $ M.findMin emptys)
+    return (fst $ M.findMin nulls)
 
-getExitUses :: MaybeC x (Node O C) -> S.Set Id -> S.Set Id
-getExitUses (JustC (Branch _)) alive = alive
-getExitUses (JustC (Czero x _ _)) alive = S.insert x alive
-getExitUses (JustC (Codd x _ _)) alive = S.insert x alive
-getExitUses (JustC _) _ = error "getExitUses"
+getExitUses :: MaybeC x (Node O C) -> S.Set Id
+getExitUses NothingC = S.empty
+getExitUses (JustC (Branch _)) = S.empty
+getExitUses (JustC (Czero x _ _)) = S.singleton x
+getExitUses (JustC (Codd x _ _)) = S.singleton x
+getExitUses (JustC _) = error "getExitUses"
 
-getUses :: [Node O O] -> S.Set Id
+getUses :: [Node O O] -> S.Set Id -> S.Set Id
   -> [(Node O O, S.Set Id)] -> [(Node O O, S.Set Id)]
-getUses (node : nodes) uses acc = case node of
-  Move x y -> go x (tryInsert y (S.delete x uses))
-  Binop x o y z -> go x (tryInsert y (tryInsert z (S.delete x uses)))
-  Reset x -> go x (S.delete x uses)
-  Inc x -> go x uses
-  Dec x -> go x uses
-  Shl x -> go x uses
-  Shr x -> go x uses
-  Load x y z -> go x (tryInsert z (S.delete x uses))
-  Store x y z -> go' (tryInsert y (tryInsert z uses))
-  Read x -> go x (S.delete x uses)
-  Write x -> go' (tryInsert x uses)
+getUses (node : nodes) used alive acc = case node of
+  Move x y | VarRV x == y -> getUses nodes used alive acc
+  Move x y -> go x (tryInsert y (S.delete x used))
+  Binop x o y z -> go x (tryInsert y (tryInsert z (S.delete x used)))
+  Reset x -> go x (S.delete x used)
+  Inc x -> go x used
+  Dec x -> go x used
+  Shl x -> go x used
+  Shr x -> go x used
+  Load x y z -> go x (tryInsert z (S.delete x used))
+  Store x y z -> go' (tryInsert y (tryInsert z used))
+  Read x -> go x (S.delete x used)
+  Write x -> go' (tryInsert x used)
   where
-    go' u = getUses nodes u ((node, uses) : acc)
-    go x u | x `S.member` uses = go' u
-           | otherwise = getUses nodes uses acc
-getUses [] _ acc = acc
+    go' u = getUses nodes u alive ((node, used) : acc)
+    go x u | x `S.member` alive = go' u
+           | x `S.member` used = go' u
+           | otherwise = getUses nodes used alive acc
+getUses [] _ _ acc = acc
 
 tryInsert :: RValue -> S.Set Id -> S.Set Id
 tryInsert (LitRV _) = id
 tryInsert (VarRV x) = S.insert x
 
 cgExit :: MaybeC x (Node O C) -> S.Set Id -> CGM ()
-cgExit NothingC alive = save alive
+cgExit NothingC alive = return ()
 cgExit (JustC node) alive = do
-  save alive
-  res <- gets resolve
+  res <- use resolve
   case node of
     Branch l -> emit (JUMP (res l))
     Czero x l1 l2 -> do
-      x' <- getLoc (VarRV x)
+      x' <- getLoc (VarRV x) []
+      saveOnLastUse x' (VarRV x) S.empty alive
       emit (JZERO x' (res l1))
       emit (JUMP (res l2))
     Codd x l1 l2 -> do
-      x' <- getLoc (VarRV x)
+      x' <- getLoc (VarRV x) []
+      saveOnLastUse x' (VarRV x) S.empty alive
       emit (JODD x' (res l1))
       emit (JUMP (res l2))
 
-cg :: [(Node O O, S.Set Id)] -> CGM ()
-cg ((node, uses) : nodes) = case node of
-  Move x y | VarRV x == y -> return ()
-           | otherwise -> do
-    y' <- getLoc y
-    rebindRegister y' x
-    cg nodes
+cg :: [(Node O O, S.Set Id)] -> S.Set Id -> CGM ()
+cg ((node, used) : nodes) alive = case node of
+  Move x y -> do
+    y' <- getLoc y []
+    saveOnLastUse y' y used alive
+    regRebind y' x used alive
+    cg nodes alive
   Binop x o y z -> do
-    y' <- getLoc y
-    z' <- getLoc z
+    y' <- getLoc y []
+    z' <- getLoc z [y']
+    unless (VarRV x == y) $ saveOnLastUse y' y used alive
+    saveOnLastUse z' z used alive
     emit (op y' z')
-    rebindRegister y' x
-    cg nodes
+    regRebind y' x used alive
+    cg nodes alive
     where
       op = case o of
         Add -> ADD
         Sub -> SUB
-        _ -> error "cg"
+        _ -> error "cg: mul/div/mod"
   Reset x -> do
-    x' <- getEmptyRegister
+    x' <- getEmptyRegister []
     emit (RESET x')
-    rebindRegister x' x
-    cg nodes
+    regRebind x' x used alive
+    cg nodes alive
   Inc x -> do
-    x' <- getLoc (VarRV x)
+    x' <- getLoc (VarRV x) []
     emit (INC x')
-    rebindRegister x' x
-    cg nodes
+    regRebind x' x used alive
+    cg nodes alive
   Dec x -> do
-    x' <- getLoc (VarRV x)
+    x' <- getLoc (VarRV x) []
     emit (DEC x')
-    rebindRegister x' x
-    cg nodes
+    regRebind x' x used alive
+    cg nodes alive
   Shl x -> do
-    x' <- getLoc (VarRV x)
+    x' <- getLoc (VarRV x) []
     emit (SHL x')
-    rebindRegister x' x
-    cg nodes
+    regRebind x' x used alive
+    cg nodes alive
   Shr x -> do
-    x' <- getLoc (VarRV x)
+    x' <- getLoc (VarRV x) []
     emit (SHR x')
-    rebindRegister x' x
-    cg nodes
+    regRebind x' x used alive
+    cg nodes alive
   Load x y zz -> do
     (mem, z') <- case zz of
       VarRV z -> do
-        Just mem <- gets (memo . (M.! y) . sym)
-        z' <- getLoc (VarRV z)
+        Just mem <- getMem y
+        z' <- getLoc zz []
+        saveOnLastUse z' zz used alive
         cgConst R0 mem
         emit (ADD z' R0)
         return (mem, z')
       LitRV z -> do
-        Just mem <- gets (memo . (M.! y) . sym)
-        z' <- getLoc (LitRV (mem + z))
+        Just mem <- getMem y
+        z' <- getLoc (LitRV (mem + z)) []
         return (mem, z')
     emit (LOAD z' (Ind z'))
-    rebindRegister z' x
-    cg nodes
-  Store x (LitRV y) z -> do
-    Just mem <- gets (memo . (M.! x) . sym)
-    z' <- getLoc z
-    cgConst R0 (mem + y)
+    regRebind z' x used alive
+    cg nodes alive
+  Store x y z -> do
+    Just mem <- getMem x
+    z' <- getLoc z []
+    saveOnLastUse z' z used alive
+    case y of
+      LitRV y ->
+        cgConst R0 (mem + y)
+      VarRV y -> do
+        y' <- getLoc (VarRV y) [z']
+        saveOnLastUse y' (VarRV y) used alive
+        cgConst R0 mem
+        emit (ADD R0 y')
     emit (STORE z' (Ind R0))
-    cg nodes
-  Store x (VarRV y) z -> do
-    Just mem <- gets (memo . (M.! x) . sym)
-    z' <- getLoc z
-    y' <- getLoc (VarRV y)
-    cgConst R0 mem
-    emit (ADD R0 y')
-    emit (STORE z' (Ind R0))
-    cg nodes
+    cg nodes alive
   Read x -> do
-    x' <- getEmptyRegister
+    x' <- getEmptyRegister []
     emit (READ x')
-    rebindRegister x' x
-    cg nodes
+    regRebind x' x used alive
+    cg nodes alive
   Write x -> do
-    x' <- getLoc x
+    x' <- getLoc x []
     emit (WRITE x')
-    cg nodes
-cg [] = return ()
+    saveOnLastUse x' x used alive
+    cg nodes alive
+cg [] _ = return ()
 
 emit :: Target -> CGM ()
-emit tg = modify (\s -> s { code = tg : code s })
+emit tg = code %= (tg :)
 
 cgConst :: Reg -> Natural -> CGM ()
 cgConst r 0 = emit (RESET r)
-cgConst r x = emit (RESET r) >> emit (INC r) >> go x
+cgConst r x = emit (RESET r) >> emit (INC r) >> go x []
   where
-    go 1 = return ()
-    go x = case divMod x 2 of
-      (d, 0) -> emit (SHL r) >> go d
-      (d, _) -> emit (SHL r) >> emit (INC r) >> go d
+    go 1 acc = mapM_ emit acc
+    go x acc = case divMod x 2 of
+      (d, 0) -> go d (SHL r : acc)
+      (d, _) -> go d (SHL r : INC r : acc)
 
 resolveLabels :: [Either Label Target] -> ([Target], Label -> Imm)
 resolveLabels = go 0 [] (mapEmpty :: LabelMap Imm)
