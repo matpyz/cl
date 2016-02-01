@@ -49,7 +49,7 @@ cgGraph (GMany (JustO entry) body (JustO exit)) = do
   let linearBody = postorder_dfs_from body (successors entry)
   bodyCode <- concat <$> mapM cgBlock linearBody
   exitCode <- cgBlock exit
-  return (entryCode ++ bodyCode ++ exitCode ++ [Right HALT])
+  return (entryCode ++ bodyCode ++ exitCode)
 
 cgBlock :: Block Node e x -> CGM [Either Label Target]
 cgBlock block = do
@@ -81,8 +81,8 @@ regBind reg var = do
   sym.ix var.regs.icontains reg .= True
   descr.ix reg.icontains var .= True
 
-regRebind :: Reg -> Id -> S.Set Id -> S.Set Id -> CGM ()
-regRebind reg var used alive = do
+regShare :: Reg -> Id -> S.Set Id -> S.Set Id -> CGM ()
+regShare reg var used alive = do
   zoom (sym.ix var) $ do
     regs .= S.singleton reg
     addrs .= S.empty
@@ -90,6 +90,11 @@ regRebind reg var used alive = do
     traverse.icontains var .= False
     ix reg.icontains var .= True
   saveOnLastUse reg (VarRV var) used alive
+
+regRebind :: Reg -> Id -> S.Set Id -> S.Set Id -> CGM ()
+regRebind reg var used alive = do
+  sym.traverse.regs.icontains reg .= False
+  regShare reg var used alive
 
 regUnbind :: Reg -> Id -> CGM ()
 regUnbind reg var =
@@ -223,7 +228,7 @@ cg ((node, used) : nodes) alive = case node of
   Move x y -> do
     y' <- getLoc y []
     saveOnLastUse y' y used alive
-    regRebind y' x used alive
+    regShare y' x used alive
     cg nodes alive
   Binop x o y z -> do
     y' <- getLoc y []
@@ -320,6 +325,6 @@ cgConst r x = emit (RESET r) >> emit (INC r) >> go x []
 resolveLabels :: [Either Label Target] -> ([Target], Label -> Imm)
 resolveLabels = go 0 [] (mapEmpty :: LabelMap Imm)
   where
-    go line code labels [] = (reverse code, fromJust . flip mapLookup labels)
+    go line code labels [] = (foldl (flip (:)) [HALT] code, fromJust . flip mapLookup labels)
     go line code labels (Left lbl : xs) = go line code (mapInsert lbl (Imm line) labels) xs
     go line code labels (Right x : xs) = go (line + 1) (x : code) labels xs
